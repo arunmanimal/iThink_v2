@@ -1,0 +1,21 @@
+# iThink Streamlit settings.  Save as:  .streamlit/config.toml
+# Defining BOTH a light and a dark theme adds a Theme choice to the app's Settings menu (top-right "⋮").
+# Keep any other sections you already had (e.g. [server]) when you replace the file.
+
+[theme]
+font = "sans serif"
+
+[theme.light]
+primaryColor = "#7C3AED"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F8FAFC"
+textColor = "#1E293B"
+
+[theme.dark]
+primaryColor = "#7C3AED"
+backgroundColor = "#0F172A"
+secondaryBackgroundColor = "#1E293B"
+textColor = "#E2E8F0"
+
+[browser]
+gatherUsageStats = false

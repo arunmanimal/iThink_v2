@@ -117,12 +117,27 @@ AUTH_COOKIE = "ithink_rt"
 COOKIE_DAYS = 14
 
 
+def _debug() -> bool:
+    try:
+        return st.query_params.get("debug") == "1"
+    except Exception:
+        return False
+
+
 def _cookie_js(value, days):
+    """Sets (or, with an empty value, deletes) the cookie. Tries the app frame first, then this frame."""
     expires = f"max-age={int(days) * 86400}" if value else "max-age=0"
     v = json.dumps(value or "")
-    script = (f"<script>try{{var d=window.parent.document;"
-              f"d.cookie='{AUTH_COOKIE}='+encodeURIComponent({v})+'; path=/; {expires}; SameSite=Lax; Secure';}}catch(e){{}}</script>")
-    components.html(script, height=0)
+    script = f"""<div id="m" style="font:12px sans-serif;color:#888"></div><script>
+    var cookie = '{AUTH_COOKIE}=' + encodeURIComponent({v}) + '; path=/; {expires}; SameSite=Lax' + (location.protocol === 'https:' ? '; Secure' : '');
+    var where = 'none';
+    try {{ window.parent.document.cookie = cookie; where = 'parent'; }} catch (e) {{}}
+    try {{ if (document.cookie.indexOf('{AUTH_COOKIE}=') < 0 && where === 'none') {{ document.cookie = cookie; where = 'self'; }} }} catch (e) {{}}
+    var seen = 'no';
+    try {{ seen = (window.parent.document.cookie.indexOf('{AUTH_COOKIE}=') >= 0) ? 'yes' : 'no'; }} catch (e) {{ seen = 'blocked'; }}
+    {"document.getElementById('m').textContent = 'cookie write via ' + where + ', visible afterwards: ' + seen;" if _debug() else ""}
+    </script>"""
+    components.html(script, height=30 if _debug() else 0)
 
 
 def flush_cookie():
@@ -146,18 +161,23 @@ def restore_session():
         return False
     try:
         token = st.context.cookies.get(AUTH_COOKIE)
-    except Exception:
+    except Exception as e:
         token = None
+        st.session_state["_restore_note"] = f"cookies unreadable: {e}"
     if not token:
+        st.session_state.setdefault("_restore_note", "no cookie reached the server")
         return False
     try:
         result = get_client().auth.refresh_session(token)
         st.session_state.user = result.user
         st.session_state.access_token = result.session.access_token
         remember_session(result.session)
+        st.session_state["_restore_note"] = "restored from cookie"
         return True
-    except Exception:
-        st.session_state["_cookie_pending"] = ""       # the token is no longer valid: forget it
+    except Exception as e:
+        st.session_state["_restore_note"] = f"cookie found but refresh failed: {type(e).__name__}: {e}"
+        if "invalid" in str(e).lower() or "not found" in str(e).lower() or "expired" in str(e).lower():
+            st.session_state["_cookie_pending"] = ""       # the token is no longer valid: forget it
         return False
 
 
@@ -1485,6 +1505,8 @@ def render_account_box(sb, membership):
         if membership:
             st.caption(f"Tenant: **{membership['tenants']['name']}**  |  Role: **{membership['role']}**")
         st.caption(f"Build {APP_BUILD}")
+        if _debug():
+            st.caption(f"Debug: {st.session_state.get('_restore_note', 'signed in this session, not restored')}")
         if membership:
             with st.expander("Change password"):
                 change_password_form(sb, get_admin_client(), membership, forced=False)
@@ -1507,6 +1529,8 @@ def main():
     if "user" not in st.session_state:
         login_view()
         flush_cookie()
+        if _debug():
+            st.caption(f"Debug: {st.session_state.get('_restore_note', 'restore not attempted')}")
         return
 
     sb = get_client()

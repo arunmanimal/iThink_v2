@@ -27,7 +27,7 @@ class AIError(Exception):
 
 
 # ---------------------------------------------------------------- calling Gemini
-FALLBACK_MODELS = ("gemini-2.5-flash-lite",)       # tried if the main model stays busy
+FALLBACK_MODELS = ("gemini-2.5-flash-lite", "gemini-flash-lite-latest", "gemini-flash-latest")   # tried in order if the main model stays busy or is not found
 RETRY_CODES = (500, 502, 503, 504)
 RETRY_WAITS = (2, 5)                                 # seconds between attempts on the same model
 
@@ -53,7 +53,7 @@ def call_gemini(prompt: str, api_key: str, model: str = MODEL, json_output: bool
         body["generationConfig"]["responseMimeType"] = "application/json"
     if system:
         body["systemInstruction"] = {"parts": [{"text": system}]}
-    last = None
+    last, not_found = None, None
     for name in (model,) + tuple(FALLBACK_MODELS):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{name}:generateContent"
         for attempt in range(len(RETRY_WAITS) + 1):
@@ -64,8 +64,8 @@ def call_gemini(prompt: str, api_key: str, model: str = MODEL, json_output: bool
                     raise AIError("The AI daily limit has been reached. Try again later.") from e
                 if e.code in (401, 403):
                     raise AIError("The AI key was refused. Check GEMINI_API_KEY in the app's secrets.") from e
-                if e.code == 404 and name != model:      # fallback model not offered: ignore it
-                    last = e
+                if e.code == 404:                        # this model name is not offered: try the next one
+                    not_found = e
                     break
                 last = e
                 if e.code not in RETRY_CODES:
@@ -78,6 +78,8 @@ def call_gemini(prompt: str, api_key: str, model: str = MODEL, json_output: bool
                 time.sleep(RETRY_WAITS[attempt])
     if isinstance(last, urllib.error.HTTPError):
         raise AIError(f"The AI service is busy right now ({last.code}). Wait a minute and press Regenerate.") from last
+    if last is None and not_found is not None:
+        raise AIError("No AI model from the list was found for this key (404). Check MODEL and FALLBACK_MODELS in ai_core.py.") from not_found
     raise AIError("The AI service could not be reached. Wait a minute and press Regenerate.") from last
 
 
@@ -160,11 +162,26 @@ SYSTEM = (
 )
 
 
-def build_insight_prompt(card: dict, payload: dict, context: dict) -> str:
+def derived_figures(payload: dict, max_points: int = 12) -> list:
+    """Ready-made figures the model may quote: each point's share of its series total, in percent with one decimal.
+    Giving them up front keeps the model from doing its own arithmetic, which is what fails the number check."""
+    lines = []
+    for s in payload.get("series", []):
+        pts = [(l, v) for l, v in s.get("points", []) if v is not None]
+        total = sum(abs(v) for _, v in pts)
+        if 1 < len(pts) <= max_points and total:
+            shares = ", ".join(f"{l}: {100 * abs(v) / total:.1f}%" for l, v in pts)
+            lines.append(f"- {s.get('name') or 'Series'}: total {total:g}; shares of total: {shares}")
+    return lines
+
+
+def build_insight_prompt(card: dict, payload: dict, context: dict, retry_hint: str = "") -> str:
     own = context.get("own_brand") or "the own brand"
     rivals = ", ".join(context.get("competitors") or []) or "the competitors"
     notes = "\n".join(f"- {n}" for n in context.get("notes") or []) or "- none"
-    return f"""Write Good, Bad and Ugly insights for ONE dashboard card.
+    figures = "\n".join(derived_figures(payload)) or "- none"
+    hint = f"\nIMPORTANT: {retry_hint}\n" if retry_hint else ""
+    return f"""Write Good, Bad and Ugly insights for ONE dashboard card.{hint}
 
 Own brand: {own}. Competitors: {rivals}.
 Card: {card.get('title')} ({card.get('subtitle') or 'no subtitle'}).
@@ -172,13 +189,16 @@ Filters applied: {context.get('filters') or 'none'}.
 Data notes:
 {notes}
 
+Ready-made figures you may quote exactly as written (percent shares of each series total):
+{figures}
+
 Meaning of the three groups, always from the point of view of {own}:
 - Good: where {own} is strong, leading, or improving.
 - Bad: where {own} trails, is weak, or is losing ground.
 - Ugly: the single biggest risk or most urgent problem, including a data limitation that stops a firm conclusion.
 
 Rules:
-- Use only numbers that appear in the data below, or a simple difference, sum, share or ratio of them. Never invent a figure, a cause or a trend.
+- Use only numbers that appear in the data below or in the ready-made figures above, or a simple difference of two data values. Prefer the ready-made percentages over your own arithmetic. Never invent a figure, a cause or a trend.
 - Write numbers in full (2400, not 2.4k) and keep each bullet under 25 words.
 - Give 1 or 2 bullets per group. If a group truly has nothing, return an empty list for it.
 - If a series has very few mentions, say the sample is small instead of drawing a conclusion.
@@ -231,6 +251,15 @@ def allowed_numbers(payload: dict, extra_text: str = "") -> set:
             allowed.add(total)
         for a, b in itertools.combinations(vals[:40], 2):      # points of one series against each other
             allowed.add(abs(a - b))
+        if total and len(vals) <= 12:                         # a few points (a pie, a small bar): ratios and share gaps
+            for a, b in itertools.combinations(vals, 2):
+                allowed.add(a + b)
+                allowed.add(100 * (abs(a) + abs(b)) / total)
+                allowed.add(100 * abs(abs(a) - abs(b)) / total)
+                if b:
+                    allowed.add(abs(a / b))
+                if a:
+                    allowed.add(abs(b / a))
     for vals in by_label.values():                             # same label across series (brand vs brand)
         for a, b in itertools.combinations(vals, 2):
             allowed.add(abs(a - b))
@@ -303,6 +332,13 @@ def generate_insights(card: dict, payload: dict, context: dict, api_key: str, ca
     raw = caller(prompt, api_key, system=SYSTEM)
     parsed = parse_insights(raw)
     kept, dropped = verify_insights(parsed, payload, context.get("filters") or "")
+    if not any(kept.values()):    # once more, telling the model its figures failed the check
+        hint = ("Your previous answer used figures that could not be checked. Quote only values copied from the data "
+                "or the ready-made percentages, and avoid any other calculation.")
+        raw = caller(build_insight_prompt(card, payload, context, retry_hint=hint), api_key, system=SYSTEM)
+        parsed = parse_insights(raw)
+        kept, dropped2 = verify_insights(parsed, payload, context.get("filters") or "")
+        dropped += dropped2
     if not any(kept.values()):
         raise AIError("No insight could be confirmed against the data for this card. Try changing the filters.")
     kept["dropped"] = dropped

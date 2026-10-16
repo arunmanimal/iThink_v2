@@ -399,6 +399,28 @@ def _brand_row(sb, tenant_id, name):
     return next((r for r in rows if r["brand_name"].lower() == name.lower()), None)
 
 
+def _move_conversation_brands(sb, src_id, dst_id, chunk=100):
+    """Point every conversation_brands row of `src` at `dst`. A conversation already linked to `dst` just loses its
+    `src` link, so nothing is duplicated and the source brand is no longer referenced."""
+    linked_src, linked_dst, start = [], set(), 0
+    while True:   # all conversations linked to the source brand, 1,000 at a time
+        page = sb.table("conversation_brands").select("conversation_id").eq("brand_id", src_id).range(start, start + 999).execute().data or []
+        linked_src += [r["conversation_id"] for r in page]
+        if len(page) < 1000:
+            break
+        start += 1000
+    for i in range(0, len(linked_src), chunk):
+        ids = linked_src[i:i + chunk]
+        have = sb.table("conversation_brands").select("conversation_id").eq("brand_id", dst_id).in_("conversation_id", ids).execute().data or []
+        linked_dst = {r["conversation_id"] for r in have}
+        both = [c for c in ids if c in linked_dst]
+        only = [c for c in ids if c not in linked_dst]
+        if both:
+            sb.table("conversation_brands").delete().eq("brand_id", src_id).in_("conversation_id", both).execute()
+        if only:
+            sb.table("conversation_brands").update({"brand_id": dst_id}).eq("brand_id", src_id).in_("conversation_id", only).execute()
+
+
 def merge_brands(sb, tenant_id: str, source_name: str, target_name: str):
     """Fold `source` into `target`: its conversations, files, names and own-brand choices move across and the
     source brand is removed. Returns (ok, message). Needs a service-role client."""
@@ -412,10 +434,10 @@ def merge_brands(sb, tenant_id: str, source_name: str, target_name: str):
             q.eq("tenant_id", tenant_id).execute()
         except Exception as e:
             notes.append(f"{table}: {e}")
-    try:   # other per-brand tables, if present in this database
-        sb.table("conversation_brands").update({"brand_id": dst["id"]}).eq("brand_id", src["id"]).execute()
-    except Exception:
-        pass
+    try:   # the brands a conversation mentions: move them, without doubling up where the target is already linked
+        _move_conversation_brands(sb, src["id"], dst["id"])
+    except Exception as e:
+        notes.append(f"conversation_brands: {e}")
     have = {a["alias"].lower() for a in (sb.table("brand_aliases").select("alias").eq("brand_id", dst["id"]).execute().data or [])}
     moving = [a["alias"] for a in (sb.table("brand_aliases").select("alias").eq("brand_id", src["id"]).execute().data or [])]
     fresh = [a for a in dict.fromkeys(moving + [src["brand_name"]]) if a.lower() not in have]

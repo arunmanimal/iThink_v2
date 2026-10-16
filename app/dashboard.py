@@ -53,14 +53,14 @@ SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"]
 
 DASH = "\u2014"
-APP_BUILD = "v19"   # shown in the sidebar so it is always clear which file is running
+APP_BUILD = "v20"   # shown in the sidebar so it is always clear which file is running
 
 # Pilot basis -- flip these when AI tagging covers the dataset (the badges and captions follow).
-SENTIMENT_SOURCE = "sprinklr"   # "sprinklr" now; "ai" once AI-tagged sentiment is complete
+SENTIMENT_SOURCE = "source"   # "source" (tags in the uploaded data) now; "ai" once AI-tagged sentiment is complete
 BRAND_SOURCE = "source file"    # pilot: brand = the export file a conversation came from; later "ai"
 
-ATTRIBUTE_SOURCE = "sprinklr"   # pilot: Sprinklr's own category fields; later "ai" (our 168-attribute taxonomy)
-# Preferred Sprinklr fields for a default, in order. The first with enough coverage wins; the user can change it.
+ATTRIBUTE_SOURCE = "source"   # pilot: the category fields in the uploaded data; later "ai" (our 168-attribute taxonomy)
+# Preferred category fields for a default, in order. The first with enough coverage wins; the user can change it.
 FIELD_PRIORITY = ["Product", "Service & Spare Parts", "Sales Subcategories", "Product Subcategories", "ICE Attributes",
                   "Workshop Subcategories", "Symptoms", "Category", "Subcategory", "NPD & QAD", "CX Journey"]
 MIN_FIELD_COVERAGE = 0.02       # a default field must cover at least 2% of conversations
@@ -452,7 +452,7 @@ GENDER_LABELS = {"F": "Female", "FEMALE": "Female", "M": "Male", "MALE": "Male",
 
 
 def gender_rows(rows):
-    """Sprinklr reports gender as M / MALE / F / FEMALE / OTHER. Merge the variants into one bar each."""
+    """The source data reports gender as M / MALE / F / FEMALE / OTHER. Merge the variants into one bar each."""
     merged = {}
     for row in rows or []:
         label = GENDER_LABELS.get(str(row["gender"]).upper(), str(row["gender"]).title())
@@ -548,7 +548,7 @@ def page_overview():
     top = (data or {}).get("top_attribute")
     tagged = (data or {}).get("tagged_conversations") or 0
     ai_sentiment, ai_brand = SENTIMENT_SOURCE == "ai", BRAND_SOURCE == "ai"
-    sentiment_label = "AI-tagged" if ai_sentiment else "Sprinklr"
+    sentiment_label = "AI-tagged" if ai_sentiment else "Source-tagged"
 
     theme.section_label("Performance snapshot")
     r1 = st.columns(4, gap="medium")
@@ -576,7 +576,7 @@ def page_overview():
         theme.kpi_tile("Top Attribute", top["attribute"] if top else None,
                        f"{top['mentions']:,} of {tagged:,} AI-tagged conversations" if top else "Needs AI-tagged conversations",
                        ai=True)
-    theme.note(f"Pilot basis: sentiment from {sentiment_label}, brand assigned by {BRAND_SOURCE}. "
+    theme.note(f"Pilot basis: sentiment is {sentiment_label.lower()}, brand assigned by {BRAND_SOURCE}. "
                "Top Attribute uses the AI-tagged sample only.")
 
     gaps, latest = brand_data_gaps((data or {}).get("trend"))
@@ -738,7 +738,7 @@ def _attribute_cached(_sb, tenant_id: str, params_json: str):
 
 
 def load_attribute(sb, membership, params, field=None):
-    """Returns (data, error). With no field chosen yet, prefers a meaningful, well-covered Sprinklr field."""
+    """Returns (data, error). With no field chosen yet, prefers a meaningful, well-covered category field."""
     tenant = (membership or {}).get("tenant_id", "")
 
     def call(chosen):
@@ -761,7 +761,7 @@ def load_attribute(sb, membership, params, field=None):
 
 
 def pick_category_field(widget_key, sb, membership, params):
-    """Loads the attribute data for the chosen Sprinklr category field and draws the field picker.
+    """Loads the attribute data for the chosen category field and draws the field picker.
     The choice is remembered across the Attribute and Benchmarking pages."""
     requested = st.session_state.get(widget_key) or st.session_state.get("attr_field_choice")
     data, error = load_attribute(sb, membership, params, requested)
@@ -775,16 +775,46 @@ def pick_category_field(widget_key, sb, membership, params):
     chosen = data.get("field") if data.get("field") in names else names[0]
     if st.session_state.get(widget_key) not in names:
         st.session_state.pop(widget_key, None)
-    picked = st.selectbox("Sprinklr category field", names, index=names.index(chosen), key=widget_key,
+    picked = st.selectbox("Category field", names, index=names.index(chosen), key=widget_key,
                           format_func=lambda n: f"{n} ({cover.get(n, 0):,} conversations)")
     st.session_state["attr_field_choice"] = picked
     return data, None
 
 
+def pick_category_fields(widget_key, sb, membership, params, limit=3):
+    """Lets the user choose one or more category fields and loads each one. Returns ([(field, data)], error)."""
+    requested = st.session_state.get("attr_field_choice")
+    first, error = load_attribute(sb, membership, params, requested)
+    if error or not first:
+        return [], error
+    fields = first.get("fields") or []
+    names = [x["field"] for x in fields]
+    if not names:
+        return [], None
+    cover = {x["field"]: x["conversations"] for x in fields}
+    default = first.get("field") if first.get("field") in names else names[0]
+    current = [n for n in (st.session_state.get(widget_key) or []) if n in names]
+    if widget_key in st.session_state and current != st.session_state.get(widget_key):
+        st.session_state[widget_key] = current
+    kwargs = {} if widget_key in st.session_state else {"default": [default]}
+    picked = st.multiselect(f"Category fields (up to {limit})", names, key=widget_key, max_selections=limit,
+                            format_func=lambda n: f"{n} ({cover.get(n, 0):,} conversations)", **kwargs) or [default]
+    st.session_state["attr_field_choice"] = picked[0]
+    out = []
+    for name in picked:
+        data = first if name == first.get("field") else None
+        if data is None:
+            data, error = load_attribute(sb, membership, params, name)
+            if error:
+                return out, error
+        out.append((name, data))
+    return out, None
+
+
 def attribute_notice(field):
     theme.data_notice(
         "Pilot basis",
-        f"Attributes are Sprinklr's own '{field}' categories, not our AI taxonomy. "
+        f"Attributes are the '{field}' categories from the uploaded data, not our AI taxonomy. "
         "AI-tagged attributes take over once tagging covers the dataset.",
     )
 
@@ -882,7 +912,7 @@ def render_virality(sb, membership, opts, f):
     with pro:
         with st.container(border=True):
             with guarded("Supporters"):
-                theme.chart_title("Supporters", "Most positive mentions of the topic (Sprinklr sentiment)")
+                theme.chart_title("Supporters", "Most positive mentions of the topic (source-tagged sentiment)")
                 rows = people_rows(data.get("supporters"))
                 if rows:
                     ai_ui.chart(charts.hbar(rows, "name", "mentions", colour=theme.EMERALD, height=300),
@@ -892,7 +922,7 @@ def render_virality(sb, membership, opts, f):
     with con:
         with st.container(border=True):
             with guarded("Opposers"):
-                theme.chart_title("Opposers", "Most negative mentions of the topic (Sprinklr sentiment)")
+                theme.chart_title("Opposers", "Most negative mentions of the topic (source-tagged sentiment)")
                 rows = people_rows(data.get("opposers"))
                 if rows:
                     ai_ui.chart(charts.hbar(rows, "name", "mentions", colour=theme.NEGATIVE, height=300),
@@ -919,7 +949,7 @@ def page_attribute():
         st.error(f"Could not load the attribute data. Has the Attribute SQL been run? Details: {error}")
         return
     if not (data or {}).get("fields"):
-        st.warning("No Sprinklr category values found yet. Run the Attribute SQL, run the ingestion script once "
+        st.warning("No category values found yet. Run the Attribute SQL, run the ingestion script once "
                    "(it fills the categories), then click Refresh data.")
         return
 
@@ -991,7 +1021,7 @@ def page_signals():
     colours = theme.brand_colors(brand_order, own=opts.get("own_brand"))
     colours["Unassigned"] = theme.NEUTRAL
     cfg = {"displayModeBar": False}
-    sentiment_label = "AI-tagged" if SENTIMENT_SOURCE == "ai" else "Sprinklr"
+    sentiment_label = "AI-tagged" if SENTIMENT_SOURCE == "ai" else "Source-tagged"
 
     theme.page_header("Signals & Sentiment", "How people feel, and where they are in the customer journey")
     theme.filter_chips(filter_summary(f))
@@ -1075,7 +1105,7 @@ def render_switching(sb, membership, opts, f, own, competitor):
             try:
                 data = _switching_cached(sb, (membership or {}).get("tenant_id", ""), json.dumps(payload, sort_keys=True))
             except Exception as e:
-                st.error(f"Could not load switching risk. Has the Switching SQL been run? Details: {e}")
+                st.error(f"Could not load switching risk. The search took too long or the Switching SQL has not been updated. Details: {e}")
                 return
             total = (data or {}).get("total") or 0
             if not total:
@@ -1110,6 +1140,9 @@ def render_switching(sb, membership, opts, f, own, competitor):
                        "(Intent = Switching) take over once tagging covers the dataset.")
 
 
+MAX_COMPETITORS = 3
+
+
 def page_benchmarking():
     sb = get_client()
     membership = st.session_state.get("membership") or {}
@@ -1119,60 +1152,73 @@ def page_benchmarking():
     competitors = [b for b in opts.get("brands", []) if b != own]
     cfg = {"displayModeBar": False}
 
-    theme.page_header("Benchmarking", "Head-to-head comparison against one competitor at a time")
+    theme.page_header("Benchmarking", "Compare your brand with one or more competitors")
     theme.filter_chips(filter_summary(f))
     if not own or not competitors:
         st.info("Benchmarking needs an own brand (pick one under Your brand in the sidebar) and at least one competitor.")
         return
 
-    if st.session_state.get("bench_competitor") not in competitors:
-        st.session_state.pop("bench_competitor", None)    # the own brand changed, so the old pick may be stale
-    competitor = st.selectbox(f"Compare {own} against", competitors, key="bench_competitor")
+    stale = [c for c in (st.session_state.get("bench_competitors") or []) if c not in competitors]
+    if stale:      # the own brand changed, so an old pick may be stale
+        st.session_state["bench_competitors"] = [c for c in st.session_state["bench_competitors"] if c in competitors]
+    pick_kwargs = {} if "bench_competitors" in st.session_state else {"default": competitors[:1]}
+    chosen = st.multiselect(f"Compare {own} against (up to {MAX_COMPETITORS})", competitors, key="bench_competitors",
+                            max_selections=MAX_COMPETITORS, **pick_kwargs)
+    if not chosen:
+        st.info("Pick at least one competitor to compare.")
+        return
+    brands = [own] + chosen
 
-    # a head-to-head always uses exactly these two brands, whatever the sidebar brand filter says
-    params = {**overview_params(f, opts), "p_brands": [own, competitor]}
-    data, error = pick_category_field("attr_field_widget_benchmarking", sb, membership, params)
+    # the comparison always uses exactly these brands, whatever the sidebar brand filter says
+    params = {**overview_params(f, opts), "p_brands": brands}
+    results, error = pick_category_fields("attr_field_widget_benchmarking", sb, membership, params)
     if error:
         st.error(f"Could not load the benchmarking data. Has the Attribute SQL been run? Details: {error}")
         return
-    if not (data or {}).get("fields"):
-        st.warning("No Sprinklr category values found yet. Run the Attribute SQL, run the ingestion script once "
+    if not results:
+        st.warning("No category values found yet. Run the Attribute SQL, run the ingestion script once "
                    "(it fills the categories), then click Refresh data.")
         return
 
-    field = data["field"]
-    attribute_notice(field)
     colours = theme.brand_colors(opts.get("brands", []), own=own)
-    matrix = data.get("matrix") or []
+    attribute_notice(", ".join(name for name, _ in results))
+    multi = len(results) > 1
 
-    theme.section_label("Head to head")
-    left, right = st.columns(2, gap="medium")
-    with left:
-        with st.container(border=True):
-            with guarded("Radar"):
-                theme.chart_title("Radar", f"Net sentiment on the most-discussed '{field}' values, both brands")
-                fig, count = charts.radar_chart(matrix, own, competitor, colours)
-                if count >= 3:
-                    ai_ui.chart(fig, config=cfg, key="bm_radar")
-                else:
-                    st.info("Fewer than 3 attributes have enough opinionated mentions (10+) for both brands.")
-    with right:
-        with st.container(border=True):
-            with guarded("Scorecard"):
-                theme.chart_title("Scorecard", "Net sentiment score, -10 to +10")
-                rows = charts.scorecard_rows(matrix, own, competitor)
-                if rows:
-                    theme.scorecard_table(rows)
-                    theme.note("Gap = your score minus theirs. Trend compares your second half of the period with the first.")
-                    ai_ui.data_insights("bm_scorecard", [
-                        {"name": f"{own} score", "points": [[r.get("attribute"), r.get("yours")] for r in rows]},
-                        {"name": f"{competitor} score", "points": [[r.get("attribute"), r.get("theirs")] for r in rows]},
-                        {"name": "Gap (own minus competitor)", "points": [[r.get("attribute"), r.get("gap")] for r in rows]}])
-                else:
-                    st.info("No attributes with enough opinionated mentions for both brands.")
+    for n, (field, data) in enumerate(results):
+        matrix = (data or {}).get("matrix") or []
+        theme.section_label(f"Head to head: {field}" if multi else "Head to head")
+        left, right = st.columns(2, gap="medium")
+        with left:
+            with st.container(border=True):
+                with guarded("Radar"):
+                    theme.chart_title("Radar", f"Net sentiment on the most-discussed '{field}' values")
+                    fig, count = charts.radar_chart(matrix, brands, colours)
+                    if count >= 3:
+                        ai_ui.chart(fig, config=cfg, key=f"bm_radar_{n}")
+                    else:
+                        st.info("Fewer than 3 attributes have enough opinionated mentions (10+) for your brand and a competitor.")
+        with right:
+            with st.container(border=True):
+                with guarded("Scorecard"):
+                    theme.chart_title("Scorecard", "Net sentiment score, -10 to +10")
+                    rows = charts.scorecard_rows(matrix, brands)
+                    if rows:
+                        theme.scorecard_table(rows, brands, own)
+                        theme.note("Gap = your score minus the average of the competitors shown. "
+                                   "Trend compares your second half of the period with the first.")
+                        series = [{"name": f"{b} score", "points": [[r.get("attribute"), r["scores"].get(b)] for r in rows]}
+                                  for b in brands]
+                        series.append({"name": "Gap (own minus competitor average)",
+                                       "points": [[r.get("attribute"), r.get("gap")] for r in rows]})
+                        ai_ui.data_insights(f"bm_scorecard_{n}", series)
+                    else:
+                        st.info("No attributes with enough opinionated mentions for your brand and a competitor.")
 
     theme.section_label("Switching risk")
-    render_switching(sb, membership, opts, f, own, competitor)
+    rival = chosen[0]
+    if len(chosen) > 1:
+        rival = st.selectbox("Switching risk against", chosen, key="bench_switch_rival")
+    render_switching(sb, membership, opts, f, own, rival)
 
 
 STREAM_PAGE_SIZE = 25

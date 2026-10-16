@@ -28,7 +28,7 @@ HISTORY_TURNS = 2
 TOOL_MENU = {
     "overview": "Mentions, share of voice, trend over time, sentiment by brand, networks, hashtags, top authors, gender, locations. No arguments.",
     "signals": "Sentiment and customer-journey signals by brand. No arguments.",
-    "attribute": "What people talk about (Sprinklr category fields) by brand. Optional argument: field (a category field name).",
+    "attribute": "What people talk about (category fields from the uploaded data) by brand. Optional argument: field (a category field name).",
     "switching": "Conversations naming both the own brand and one competitor, with comparison / switching language. Argument: competitor (a competitor brand name).",
     "posts": "A few real posts as evidence. Optional arguments: brand, sentiment (Positive, Neutral or Negative), sort (newest, engaged or reach).",
 }

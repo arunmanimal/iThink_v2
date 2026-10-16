@@ -212,7 +212,7 @@ def render(sb, admin, membership, user, opts, on_data_changed):
     # ---------------- 1. upload
     theme.section_label("1. Upload your files")
     nonce = st.session_state.get("upload_nonce", 0)
-    files = st.file_uploader("Excel, CSV or JSON exports (Sprinklr, Brandwatch). Several files are fine.",
+    files = st.file_uploader("Excel, CSV or JSON exports from your social listening tool. Several files are fine.",
                              type=ACCEPT, accept_multiple_files=True, key=f"uploader_{nonce}",
                              disabled=admin is None)
     matchers = bs.build_matchers(saved["defs"])
@@ -236,7 +236,7 @@ def render(sb, admin, membership, user, opts, on_data_changed):
             if info.get("error"):
                 st.markdown(f"**{info['file']}**  :red[{info['error']}]")
                 continue
-            parts = [f"**{info['file']}**", f":green[{info['profile'].title()} detected]", f"{info['rows']:,} rows"]
+            parts = [f"**{info['file']}**", ":green[Export format recognised]", f"{info['rows']:,} rows"]
             if info.get("undated"):
                 parts.append(f":orange[{info['undated']:,} rows without a date]")
             st.markdown("  \u00b7  ".join(parts))

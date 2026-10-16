@@ -49,8 +49,8 @@ def _filters_text(f: dict, opts: dict) -> str:
 def _context() -> dict:
     opts = st.session_state.get("filter_opts") or {}
     own = opts.get("own_brand")
-    notes = ["Sentiment is Sprinklr's own sentiment tag, not an AI judgement.",
-             "Attribute values, where shown, are Sprinklr's own category fields."]
+    notes = ["Sentiment is the tag that came with the uploaded data, not an AI judgement.",
+             "Attribute values, where shown, are the category fields from the uploaded data."]
     if (st.session_state.get("synthetic_count") or 0) > 0:
         notes.append("Some conversations carry simulated dates, so never describe a change over time as a real trend.")
     return {

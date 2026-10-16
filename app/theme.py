@@ -462,21 +462,23 @@ def word_cloud(words, limit: int = 60) -> bool:
     return True
 
 
-def scorecard_table(rows) -> None:
-    """rows: dicts with attribute, yours, theirs, gap (floats or None) and trend ('up' | 'down' | 'flat' | None)."""
-    def num(value, signed=True):
-        return "-" if value is None else (f"{value:+.1f}" if signed else f"{value:.1f}")
+def scorecard_table(rows, brands, own) -> None:
+    """rows: dicts with attribute, scores ({brand: float | None}), gap (own minus the average of the other brands)
+    and trend ('up' | 'down' | 'flat' | None). brands: column order, own brand first."""
+    def num(value):
+        return "-" if value is None else f"{value:+.1f}"
     arrows = {"up": '<span class="trend-up">&#9650;</span>', "down": '<span class="trend-down">&#9660;</span>',
               "flat": '<span class="trend-flat">&#9654;</span>'}
+    gap_label = "Gap" if len(brands) == 2 else "Gap vs average"
     body = ""
     for row in rows:
         gap = row.get("gap")
         gap_cls = "" if gap is None or abs(gap) < 0.05 else ("gap-up" if gap > 0 else "gap-down")
-        body += (f'<tr><td>{_h(row.get("attribute"))}</td><td class="num">{num(row.get("yours"))}</td>'
-                 f'<td class="num">{num(row.get("theirs"))}</td><td class="num {gap_cls}">{num(gap)}</td>'
+        cells = "".join(f'<td class="num">{num((row.get("scores") or {}).get(b))}</td>' for b in brands)
+        body += (f'<tr><td>{_h(row.get("attribute"))}</td>{cells}<td class="num {gap_cls}">{num(gap)}</td>'
                  f'<td class="num">{arrows.get(row.get("trend"), "-")}</td></tr>')
-    head = ('<tr><th>Attribute</th><th class="num">Your score</th><th class="num">Their score</th>'
-            '<th class="num">Gap</th><th class="num">Trend</th></tr>')
+    heads = "".join(f'<th class="num">{_h(b)}</th>' for b in brands)
+    head = f'<tr><th>Attribute</th>{heads}<th class="num">{gap_label}</th><th class="num">Trend</th></tr>'
     st.markdown(f'<table class="scorecard"><thead>{head}</thead><tbody>{body}</tbody></table>', unsafe_allow_html=True)
 
 

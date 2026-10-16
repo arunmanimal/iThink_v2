@@ -387,36 +387,47 @@ def score_heatmap(rows, brand_order, value_order):
     return _style(fig, max(300, 40 * len(grid.index) + 110), legend=False, margin=dict(l=4, r=4, t=36, b=4))
 
 
-def _head_to_head(rows, own, competitor, top):
+def _compare(rows, brands, top):
+    """Net-sentiment grid for the chosen brands (own brand first). Keeps attributes where the own brand and at
+    least one other brand have enough opinions; a brand without enough opinions on an attribute stays blank."""
     scores = attribute_scores(rows)
-    if scores.empty:
-        return scores.iloc[0:0], {}
-    pair = scores[scores["brand"].isin([own, competitor])]
+    if scores.empty or not brands:
+        return scores.iloc[0:0], scores.iloc[0:0]
+    own = brands[0]
+    pair = scores[scores["brand"].isin(brands)]
     grid = pair.pivot(index="value", columns="brand", values="score")
-    if own not in grid.columns or competitor not in grid.columns:
-        return grid.iloc[0:0], {}
-    grid = grid.dropna(subset=[own, competitor])
+    if own not in grid.columns:
+        return grid.iloc[0:0], pair
+    others = [b for b in brands[1:] if b in grid.columns]
+    if not others:
+        return grid.iloc[0:0], pair
+    grid = grid.dropna(subset=[own])
+    grid = grid[grid[others].notna().any(axis=1)]
     volume = pair.groupby("value")["mentions"].sum().reindex(grid.index).sort_values(ascending=False)
     grid = grid.loc[list(volume.index[:top])]
     return grid, pair
 
 
-def radar_chart(rows, own, competitor, colours, top=10):
-    """Own brand vs one competitor across the most-discussed attributes both have enough opinions on.
+def radar_chart(rows, brands, colours, top=10):
+    """Own brand (first in brands) against one or more competitors across the most-discussed attributes.
     Returns (figure, number_of_attributes)."""
     fig = go.Figure()
-    grid, _ = _head_to_head(rows, own, competitor, top)
+    grid, _ = _compare(rows, brands, top)
     if len(grid) == 0:
         return _style(fig, 380), 0
+    own = brands[0]
     names = [_short(v, 22) for v in grid.index]
-    for brand in (own, competitor):
-        values = [float(v) for v in grid[brand]]
+    for brand in brands:
+        if brand not in grid.columns:
+            continue
+        values = [None if pd.isna(v) else float(v) for v in grid[brand]]
         fig.add_trace(go.Scatterpolar(
             r=values + values[:1],
             theta=names + names[:1],
             name=brand,
             fill="toself",
-            opacity=0.55,
+            opacity=0.5,
+            connectgaps=False,
             line=dict(color=colours.get(brand, theme.NEUTRAL), width=3 if brand == own else 2),
             hovertemplate="%{theta}: %{r:+.1f}<extra>" + brand + "</extra>",
         ))
@@ -428,18 +439,25 @@ def radar_chart(rows, own, competitor, colours, top=10):
     return _style(fig, 380, margin=dict(l=40, r=40, t=20, b=20)), len(grid)
 
 
-def scorecard_rows(rows, own, competitor, top=10):
-    """Rows for the scorecard table: your score, theirs, the gap and your trend (second half vs first half)."""
-    grid, pair = _head_to_head(rows, own, competitor, top)
+def scorecard_rows(rows, brands, top=10):
+    """Rows for the scorecard: every chosen brand's score, the own brand's gap to the average of the others, and the
+    own brand's trend (second half vs first half). Returns [{attribute, scores: {brand: float | None}, gap, trend}]."""
+    grid, pair = _compare(rows, brands, top)
     out = []
+    if len(grid) == 0:
+        return out
+    own = brands[0]
+    others = [b for b in brands[1:] if b in grid.columns]
     for value in grid.index:
-        yours, theirs = float(grid.loc[value, own]), float(grid.loc[value, competitor])
+        scores = {b: (None if pd.isna(grid.loc[value, b]) else float(grid.loc[value, b])) for b in brands if b in grid.columns}
+        rivals = [scores[b] for b in others if scores.get(b) is not None]
+        gap = scores[own] - sum(rivals) / len(rivals) if rivals else None
         mine = pair[(pair["value"] == value) & (pair["brand"] == own)].iloc[0]
         trend = None
         if pd.notna(mine["score_h1"]) and pd.notna(mine["score_h2"]):
             change = mine["score_h2"] - mine["score_h1"]
             trend = "up" if change >= TREND_THRESHOLD else ("down" if change <= -TREND_THRESHOLD else "flat")
-        out.append({"attribute": value, "yours": yours, "theirs": theirs, "gap": yours - theirs, "trend": trend})
+        out.append({"attribute": value, "scores": scores, "gap": gap, "trend": trend})
     return out
 
 

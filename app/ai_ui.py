@@ -2,7 +2,9 @@
 iThink AI - Streamlit glue
 --------------------------
 chart(fig, ...) draws a Plotly chart exactly like st.plotly_chart and adds an Insights button under it.
-Pressing it opens Good / Bad / Ugly insights written from the numbers behind that chart.
+Pressing it opens two or three action-led insights (Fix / Protect / Grow). Each one explains what is happening, quotes
+a real post that shows why, and names a next step. The AI reads the numbers behind the chart plus a handful of real
+posts chosen for that card, and every number and quote is checked before it is shown.
 
 Results are cached per chart, filters and data, so opening a card again costs nothing.
 
@@ -10,6 +12,7 @@ Save as: app/ai_ui.py   (needs ai_core.py and theme.py in the same folder)
 """
 import hashlib
 import json
+import re
 import time
 
 import streamlit as st
@@ -58,10 +61,71 @@ def _context() -> dict:
     }
 
 
+_EVIDENCE = {"fn": None}
+
+
+def set_evidence(fn):
+    """The dashboard supplies fn(brand, sentiment, limit) -> list of posts, already restricted to the signed-in user's
+    tenant and filters. Without it, insights fall back to the chart numbers only."""
+    _EVIDENCE["fn"] = fn
+
+
+_STOP = set("""with from this that have your their about over under into than then them they what when where which while share
+mentions mention total sentiment brand brands count counts number numbers other unknown overall percent time week month
+day most more less each over per top""".split())
+POSTS_PER_CARD = 12
+POST_TEXT_CHARS = 280
+
+
+def _card_terms(payload: dict, context: dict) -> set:
+    skip = {w.lower() for name in [context.get("own_brand")] + list(context.get("competitors") or []) if name
+            for w in re.findall(r"[A-Za-z0-9]+", name)}
+    terms = set()
+    for s in payload.get("series", []):
+        for label, _ in s.get("points", [])[:60]:
+            for w in re.findall(r"[A-Za-z]{4,}", str(label).lower()):
+                if w not in _STOP and w not in skip:
+                    terms.add(w)
+    return terms
+
+
+def gather_evidence(card: dict, payload: dict, context: dict) -> list:
+    """A few real posts that bear on this card: the own brand's most engaged negative and positive posts, plus a
+    competitor's negative posts when the card names it. Posts that use the card's own words rank first."""
+    fn = _EVIDENCE.get("fn")
+    if not fn:
+        return []
+    own, rivals = context.get("own_brand"), context.get("competitors") or []
+    label_text = " ".join(f"{s.get('name', '')} " + " ".join(str(l) for l, _ in s.get("points", [])[:60])
+                          for s in payload.get("series", [])).lower()
+    mentioned = [b for b in rivals if b.lower() in label_text][:2]
+    pool = []
+    try:
+        for sentiment, limit in (("Negative", 20), ("Positive", 12)):
+            pool += [(own, r) for r in (fn(own, sentiment, limit) or [])]
+        for b in mentioned:
+            pool += [(b, r) for r in (fn(b, "Negative", 8) or [])]
+    except Exception:
+        return []
+    terms = _card_terms(payload, context)
+    seen, scored = set(), []
+    for idx, (brand, r) in enumerate(pool):
+        text = re.sub(r"\s+", " ", str(r.get("text") or "")).strip()
+        if len(text) < 30 or text.lower() in seen:
+            continue
+        seen.add(text.lower())
+        scored.append((-sum(1 for t in terms if t in text.lower()), idx, brand, r, text))
+    scored.sort(key=lambda x: (x[0], x[1]))
+    return [{"id": f"P{n}", "brand": brand, "sentiment": r.get("sentiment"), "source": r.get("source"),
+             "date": str(r.get("date") or "")[:10], "url": r.get("url"), "text": text[:POST_TEXT_CHARS]}
+            for n, (_, _, brand, r, text) in enumerate(scored[:POSTS_PER_CARD], 1)]
+
+
 @st.cache_data(ttl=6 * 3600, show_spinner=False, max_entries=300)
-def _cached_insights(card_json: str, payload_json: str, context_json: str, nonce: int) -> dict:
+def _cached_insights(card_json: str, payload_json: str, context_json: str, posts_json: str, nonce: int) -> dict:
     """nonce is only here so Regenerate can skip the cache. Errors are raised, so they are never cached."""
-    result = ai.generate_insights(json.loads(card_json), json.loads(payload_json), json.loads(context_json), _api_key())
+    result = ai.generate_insights(json.loads(card_json), json.loads(payload_json), json.loads(context_json), _api_key(),
+                                  posts=json.loads(posts_json))
     result["at"] = time.strftime("%d %b, %H:%M")
     return result
 
@@ -95,8 +159,9 @@ def insights_for(fig, key: str, card: dict = None, payload: dict = None):
         st.info("Insights are not available for this chart.")
         return
     context = _context()
+    posts = gather_evidence(card, payload, context)
     args = (json.dumps(card, sort_keys=True), json.dumps(payload, sort_keys=True),
-            json.dumps(context, sort_keys=True), st.session_state.get(nonce_key, 0))
+            json.dumps(context, sort_keys=True), json.dumps(posts, sort_keys=True), st.session_state.get(nonce_key, 0))
     seen = st.session_state.setdefault("ai_seen", set())
     fingerprint = hashlib.md5("".join(map(str, args)).encode()).hexdigest()
     try:
@@ -113,11 +178,13 @@ def insights_for(fig, key: str, card: dict = None, payload: dict = None):
     if fingerprint not in seen:          # count a request once per distinct result shown
         seen.add(fingerprint)
         st.session_state["ai_calls"] = st.session_state.get("ai_calls", 0) + 1
-    meta = f"Insights for this card, {result.get('at', '')}"
-    theme.insight_block(result, meta)
-    note = "Every number is checked against the chart data."
+    meta = f"What to do about this card, {result.get('at', '')}"
+    theme.insight_cards(result.get("items") or [], meta)
+    note = "Numbers are checked against the chart data. Quotes are real posts."
+    if not posts:
+        note = "Numbers are checked against the chart data. No posts were available for quotes."
     if result.get("dropped"):
-        note += f" {result['dropped']} statement(s) were removed because they could not be checked."
+        note += f" {result['dropped']} suggestion(s) were removed because they could not be checked."
     st.caption(note)
     st.button("Regenerate", key=f"ins_regen_{key}", on_click=_regenerate, args=(nonce_key,), use_container_width=True)
 

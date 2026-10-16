@@ -53,7 +53,7 @@ SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"]
 
 DASH = "\u2014"
-APP_BUILD = "v18"   # shown in the sidebar so it is always clear which file is running
+APP_BUILD = "v19"   # shown in the sidebar so it is always clear which file is running
 
 # Pilot basis -- flip these when AI tagging covers the dataset (the badges and captions follow).
 SENTIMENT_SOURCE = "sprinklr"   # "sprinklr" now; "ai" once AI-tagged sentiment is complete
@@ -1289,6 +1289,30 @@ def page_data_brands():
 CHAT_BRAND_FIELDS = ("author", "source", "date", "sentiment", "text", "url")
 
 
+EVIDENCE_FIELDS = ("author", "source", "date", "sentiment", "text", "url")
+
+
+def make_evidence_fetcher():
+    """Posts that back up an AI insight. Same tenant, dates and networks as the chat; only the brand and sentiment change."""
+    sb = get_client()
+    membership = st.session_state.get("membership") or {}
+    tenant = membership.get("tenant_id", "")
+    opts = st.session_state.get("filter_opts", {})
+    base = overview_params(effective_filters("chat"), opts)
+    known = set(opts.get("brands", []))
+
+    def fetch(brand, sentiment, limit):
+        if brand not in known or sentiment not in SENTIMENTS:
+            return []
+        payload = {"p_start": base["p_start"], "p_end": base["p_end"], "p_brand": brand,
+                   "p_networks": base["p_networks"], "p_sentiments": [sentiment.lower()],
+                   "p_sort": "engaged", "p_limit": int(limit), "p_offset": 0}
+        data = _stream_cached(sb, tenant, json.dumps(payload, sort_keys=True))
+        return [{k: r.get(k) for k in EVIDENCE_FIELDS} for r in (data or {}).get("rows") or []]
+
+    return fetch
+
+
 def build_chat_env():
     """The chat can only call these functions, with the signed-in user's own filters and permissions.
     It never writes SQL and never chooses a tenant."""
@@ -1414,6 +1438,7 @@ def main():
     if can("manage_team"):
         pages.append(st.Page(page_team, title="Team", icon=":material/group:", url_path="team"))
     navigation = st.navigation(pages)
+    ai_ui.set_evidence(make_evidence_fetcher())
     navigation.run()
     if navigation.title not in ("Data & Brand Selection", "Team"):
         with chat_slot:

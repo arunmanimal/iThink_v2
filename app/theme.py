@@ -234,7 +234,7 @@ section[data-testid="stSidebar"] h3 {
 }
 .data-notice b { color: __AMBER_TEXT__; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.7rem; }
 
-/* ---- AI insights (Good / Bad / Ugly) ---- */
+/* ---- AI insights ---- */
 .ins-meta { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; color: __MUTED__; font-size: 0.74rem; margin: 6px 0 6px 0; }
 .ai-pill { border: 1px solid __VIOLET__; background: rgba(124,58,237,0.10); color: __VI_TEXT__; border-radius: 999px;
            padding: 1px 9px; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.06em; margin-right: 6px; }
@@ -245,6 +245,18 @@ section[data-testid="stSidebar"] h3 {
 .ins-row.good { background: rgba(16,185,129,0.12); } .ins-row.good .ins-tag { color: __EM_TEXT__; }
 .ins-row.bad  { background: rgba(245,158,11,0.15); } .ins-row.bad  .ins-tag { color: __AMBER_TEXT__; }
 .ins-row.ugly { background: rgba(225,29,72,0.10); }  .ins-row.ugly .ins-tag { color: __NEG_TEXT__; }
+/* ---- AI insights, action-led (Fix / Protect / Grow) ---- */
+.ins-card { border-radius: 10px; padding: 10px 12px; margin: 0 0 10px 0; border-left: 4px solid transparent; }
+.ins-card.fix { background: rgba(225,29,72,0.10); border-left-color: #E11D48; }
+.ins-card.protect { background: rgba(16,185,129,0.12); border-left-color: #10B981; }
+.ins-card.grow { background: rgba(124,58,237,0.12); border-left-color: #7C3AED; }
+.ins-kind { font-weight: 800; font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase; margin-right: 8px; }
+.ins-card.fix .ins-kind { color: __NEG_TEXT__; } .ins-card.protect .ins-kind { color: __EM_TEXT__; } .ins-card.grow .ins-kind { color: __VI_TEXT__; }
+.ins-head { color: __INK__; font-weight: 600; font-size: 0.88rem; }
+.ins-quote { color: __INK__; font-size: 0.82rem; font-style: italic; margin: 6px 0 0 0; padding-left: 10px; border-left: 2px solid __MUTED__; }
+.ins-src { color: __MUTED__; font-size: 0.72rem; font-style: normal; margin-left: 6px; }
+.ins-src a { color: inherit; }
+.ins-action { color: __INK__; font-size: 0.84rem; margin: 6px 0 0 0; }
 
 /* ---- placeholder cards ---- */
 .ph-card {
@@ -505,6 +517,27 @@ def brand_colors(brands, own=None) -> dict:
             colours[b] = COMPETITOR_SERIES[i % len(COMPETITOR_SERIES)]
             i += 1
     return colours
+
+
+def insight_cards(items: list, meta: str = "") -> None:
+    """Action-led insights. items: [{kind: fix|protect|grow, headline, quote, source, url, action}] (plain text, escaped here)."""
+    labels = {"fix": "Fix", "protect": "Protect", "grow": "Grow"}
+    head = f'<div class="ins-meta"><span><span class="ai-pill">AI</span>{escape(meta)}</span></div>'
+    cards = ""
+    for it in items:
+        kind = it.get("kind") if it.get("kind") in labels else "grow"
+        quote = ""
+        if it.get("quote"):
+            link = ""
+            url = str(it.get("url") or "")
+            if url.startswith(("http://", "https://")):
+                link = f' &middot; <a href="{escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">open post</a>'
+            src = f'<span class="ins-src">{escape(it.get("source") or "")}{link}</span>'
+            quote = f'<div class="ins-quote">&ldquo;{escape(it["quote"])}&rdquo;{src}</div>'
+        cards += (f'<div class="ins-card {kind}"><div><span class="ins-kind">{labels[kind]}</span>'
+                  f'<span class="ins-head">{escape(it.get("headline") or "")}</span></div>{quote}'
+                  f'<div class="ins-action"><b>Action:</b> {escape(it.get("action") or "")}</div></div>')
+    st.markdown(head + cards, unsafe_allow_html=True)
 
 
 def insight_block(groups: dict, meta: str = "") -> None:

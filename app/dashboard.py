@@ -15,6 +15,7 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
 import streamlit as st
+import streamlit.components.v1 as components
 from PIL import Image
 from supabase import create_client
 
@@ -53,7 +54,7 @@ SUPABASE_URL = st.secrets["SUPABASE_URL"]
 SUPABASE_ANON_KEY = st.secrets["SUPABASE_ANON_KEY"]
 
 DASH = "\u2014"
-APP_BUILD = "v20"   # shown in the sidebar so it is always clear which file is running
+APP_BUILD = "v21"   # shown in the sidebar so it is always clear which file is running
 
 # Pilot basis -- flip these when AI tagging covers the dataset (the badges and captions follow).
 SENTIMENT_SOURCE = "source"   # "source" (tags in the uploaded data) now; "ai" once AI-tagged sentiment is complete
@@ -109,6 +110,69 @@ def get_admin_client():
     return create_client(SUPABASE_URL, key) if key else None
 
 
+# ---- stay signed in across a page refresh -------------------------------------------------------
+# A browser refresh starts a new Streamlit session, which loses everything in session_state. So the sign-in's refresh
+# token is kept in a browser cookie and used to restore the session. Logging out revokes the token and clears the cookie.
+AUTH_COOKIE = "ithink_rt"
+COOKIE_DAYS = 14
+
+
+def _cookie_js(value, days):
+    expires = f"max-age={int(days) * 86400}" if value else "max-age=0"
+    v = json.dumps(value or "")
+    script = (f"<script>try{{var d=window.parent.document;"
+              f"d.cookie='{AUTH_COOKIE}='+encodeURIComponent({v})+'; path=/; {expires}; SameSite=Lax; Secure';}}catch(e){{}}</script>")
+    components.html(script, height=0)
+
+
+def flush_cookie():
+    """Writes any pending cookie change into the browser. Called at the end of a run that changed the sign-in."""
+    pending = st.session_state.pop("_cookie_pending", None)
+    if pending is not None:
+        _cookie_js(pending, COOKIE_DAYS)
+
+
+def remember_session(session):
+    """Keep the browser cookie in step with the current refresh token (it changes whenever it is used)."""
+    token = getattr(session, "refresh_token", None)
+    if token and token != st.session_state.get("_rt"):
+        st.session_state["_rt"] = token
+        st.session_state["_cookie_pending"] = token
+
+
+def restore_session():
+    """Signs the person back in from the cookie after a refresh. Returns True when it worked."""
+    if st.session_state.get("_logged_out"):
+        return False
+    try:
+        token = st.context.cookies.get(AUTH_COOKIE)
+    except Exception:
+        token = None
+    if not token:
+        return False
+    try:
+        result = get_client().auth.refresh_session(token)
+        st.session_state.user = result.user
+        st.session_state.access_token = result.session.access_token
+        remember_session(result.session)
+        return True
+    except Exception:
+        st.session_state["_cookie_pending"] = ""       # the token is no longer valid: forget it
+        return False
+
+
+def current_token(sb):
+    """The signed-in user's access token, renewed when it is about to expire (they last about an hour)."""
+    try:
+        session = sb.auth.get_session()
+        if session and session.access_token:
+            st.session_state.access_token = session.access_token
+            remember_session(session)
+    except Exception:
+        pass
+    return st.session_state.access_token
+
+
 def login_view():
     theme.login_header()
     _, mid, _ = st.columns([1, 1.1, 1])
@@ -124,6 +188,8 @@ def login_view():
                 result = get_client().auth.sign_in_with_password({"email": email, "password": password})
                 st.session_state.user = result.user
                 st.session_state.access_token = result.session.access_token
+                st.session_state.pop("_logged_out", None)
+                remember_session(result.session)
                 ok = True
             except Exception:
                 st.error("Login failed. Check your e-mail and password.")
@@ -1429,16 +1495,23 @@ def render_account_box(sb, membership):
                 pass
             for key in SESSION_KEYS:
                 st.session_state.pop(key, None)
+            st.session_state.pop("_rt", None)
+            st.session_state["_logged_out"] = True
+            st.session_state["_cookie_pending"] = ""
             st.rerun()
 
 
 def main():
+    if "user" not in st.session_state and restore_session():
+        st.rerun()
     if "user" not in st.session_state:
         login_view()
+        flush_cookie()
         return
 
     sb = get_client()
-    sb.postgrest.auth(st.session_state.access_token)  # attach the user's JWT so RLS applies
+    sb.postgrest.auth(current_token(sb))  # attach the user's JWT so RLS applies
+    flush_cookie()
     membership = load_membership(sb, st.session_state.user.id)
 
     horizontal, icon = theme.logo_path("horizontal"), theme.logo_path("icon")

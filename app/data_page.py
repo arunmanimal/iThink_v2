@@ -158,6 +158,40 @@ def _save_detected(ctx):
     _persist(ctx, brands, own_name, (st.session_state.get("bs_ind2") or "").strip())
 
 
+def _merge(ctx):
+    src, dst = st.session_state.get("tidy_src"), st.session_state.get("tidy_dst")
+    if not src or not dst:
+        _flash("error", "Choose the brand to merge and the brand to merge it into.")
+        return
+    try:
+        ok, message = bs.merge_brands(ctx["admin"], ctx["tenant_id"], src, dst)
+    except Exception as e:
+        ok, message = False, f"Merge failed: {e}"
+    if st.session_state.get("own_override") == src:
+        st.session_state["own_override"] = dst
+    _after_tidy()
+    _flash("success" if ok else "error", message)
+
+
+def _remove(ctx):
+    src = st.session_state.get("tidy_src")
+    if not src:
+        _flash("error", "Choose the brand to remove.")
+        return
+    try:
+        ok, message = bs.remove_brand(ctx["admin"], ctx["tenant_id"], src)
+    except Exception as e:
+        ok, message = False, f"Remove failed: {e}"
+    _after_tidy()
+    _flash("success" if ok else "error", message)
+
+
+def _after_tidy():
+    for key in ("dp_saved", "filter_opts", "f_own_brand", "tidy_src", "tidy_dst"):
+        st.session_state.pop(key, None)
+    st.cache_data.clear()
+
+
 # ---------------------------------------------------------------- page
 def render(sb, admin, membership, user, opts, on_data_changed):
     """sb: the signed-in user's client. admin: service-role client or None. on_data_changed(): clears dashboard caches."""
@@ -194,6 +228,9 @@ def render(sb, admin, membership, user, opts, on_data_changed):
         except Exception as e:
             info = {"file": f.name, "error": f"Could not read this file ({e}).", "rows": 0}
         inspected.append(info)
+    detect_label = "Work it out from each row"
+    brand_names = [d["name"] for d in saved["defs"]]
+    file_brands = {}
     for info in inspected:
         with st.container(border=True):
             if info.get("error"):
@@ -202,9 +239,16 @@ def render(sb, admin, membership, user, opts, on_data_changed):
             parts = [f"**{info['file']}**", f":green[{info['profile'].title()} detected]", f"{info['rows']:,} rows"]
             if info.get("undated"):
                 parts.append(f":orange[{info['undated']:,} rows without a date]")
-            if info.get("file_brand"):
-                parts.append(f"Brand from file name: {info['file_brand']}")
-            st.markdown("  ·  ".join(parts))
+            st.markdown("  \u00b7  ".join(parts))
+            if brand_names:
+                options = [detect_label] + brand_names
+                guess = info.get("file_brand")
+                choice = st.selectbox(
+                    "Which brand is this file about?", options, key=f"fb_{nonce}_{info['file']}",
+                    index=options.index(guess) if guess in options else 0,
+                    help="Pick a brand if the whole file is about one. Otherwise each row is matched on the brand "
+                         "names in its text.")
+                file_brands[info["file"]] = None if choice == detect_label else choice
     readable = [f for f, info in zip(files or [], inspected) if not info.get("error")]
 
     # ---------------- 2. brands
@@ -276,7 +320,7 @@ def render(sb, admin, membership, user, opts, on_data_changed):
                     table = pd.DataFrame([{
                         "Track": d["confidence"] == "high",
                         "Brand": d["name"],
-                        "Other names": "",
+                        "Other names": ", ".join(d.get("aliases", [])),
                         "Mentions": d["mentions"],
                         "Found in": d["evidence"],
                     } for d in found["found"]])
@@ -292,6 +336,21 @@ def render(sb, admin, membership, user, opts, on_data_changed):
                                  index=tracked.index(own_default) if own_default in tracked else None,
                                  placeholder="Choose your brand")
                     st.button("Save brands", type="primary", key="dp_save_found", on_click=_save_detected, args=(ctx,))
+        if len(saved["defs"]) > 1:
+            with st.expander("Tidy brands: merge a duplicate or remove an unused brand"):
+                st.caption("Use this when the same brand was saved twice under different names. Merging moves all of "
+                           "its conversations and names into the brand you keep, then removes the duplicate.")
+                names = [d["name"] for d in saved["defs"]]
+                t1, t2 = st.columns(2, gap="medium")
+                with t1:
+                    st.selectbox("Brand to merge or remove", names, key="tidy_src", index=None, placeholder="Choose a brand")
+                with t2:
+                    keep = [n for n in names if n != st.session_state.get("tidy_src")]
+                    st.selectbox("Merge into (the brand to keep)", keep, key="tidy_dst", index=None, placeholder="Choose a brand")
+                b1, b2, _ = st.columns([1, 1, 3])
+                b1.button("Merge", key="dp_merge", type="primary", on_click=_merge, args=(ctx,))
+                b2.button("Remove", key="dp_remove", on_click=_remove, args=(ctx,),
+                          help="Only works for a brand with no conversations.")
         if saved["defs"]:
             st.button("Cancel", key="dp_cancel", on_click=_cancel_edit)
 
@@ -321,7 +380,7 @@ def render(sb, admin, membership, user, opts, on_data_changed):
                 bar.progress(min(1.0, (i + fraction) / max(n, 1)), text=f"File {i + 1} of {n}: {message}")
 
             results = core.process_uploads(admin, tenant_id, user.id, user.email,
-                                           [(f.name, f.getvalue()) for f in readable], on_progress=cb)
+                                           [(f.name, f.getvalue(), file_brands.get(f.name)) for f in readable], on_progress=cb)
             st.session_state["dp_last"] = results
             st.session_state["upload_nonce"] = nonce + 1
             st.session_state.pop("dp_saved", None)

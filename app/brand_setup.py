@@ -78,8 +78,11 @@ def all_aliases(name: str, aliases):
 
 # ---------------------------------------------------------------- matching text to brands
 def _term_regex(term: str):
-    pieces = [re.escape(p) for p in re.split(r"[\s\-_]+", term.strip()) if p]
-    return r"(?<![A-Za-z0-9])" + r"[\s\-_]*".join(pieces) + r"(?![A-Za-z0-9])"
+    """Matches the term however it is spaced or hyphenated: 'X Pulse 200', 'X-Pulse 200', 'XPulse200' and
+    'xpulse 200' all match each other. Letters and digits must stay in order, and the term must stand alone
+    (no letter or digit directly before or after it)."""
+    chars = [re.escape(c) for c in term if not (c.isspace() or c in "-_")]
+    return r"(?<![A-Za-z0-9])" + r"[\s\-_]*".join(chars) + r"(?![A-Za-z0-9])"
 
 
 def build_matchers(brands):
@@ -232,7 +235,62 @@ def detect_brands(df: pd.DataFrame, text_column=None, known_brands=None, ai_name
         return 0 if (" " in n or any(ch.isdigit() for ch in n)) else 1
 
     ordered = sorted(found.values(), key=lambda d: (rank[d["confidence"]], shape(d), -d["mentions"]))
-    return ordered[:max_brands]
+    return group_similar(ordered)[:max_brands]
+
+
+# ---------------------------------------------------------------- group spelling variants of one brand
+def _tokens(name: str):
+    return re.findall(r"[a-z]+|\d+", name.lower())
+
+
+def _collapsed(name: str):
+    return "".join(_tokens(name))
+
+
+def _token_match(a: str, b: str) -> bool:
+    return a == b or (len(a) >= 3 and len(b) >= 3 and (a.startswith(b) or b.startswith(a)))
+
+
+def _fits_inside(small: str, big: str) -> bool:
+    """small looks like a shorter way of writing big: every word of small appears in big (adv ~ adventure),
+    or small, with spaces and hyphens removed, sits inside big written the same way (X-Pulse ~ Xpulse)."""
+    st, bt = _tokens(small), _tokens(big)
+    if not st:
+        return False
+    if all(any(_token_match(s_, b_) for b_ in bt) for s_ in st):
+        return True
+    cs, cb = _collapsed(small), _collapsed(big)
+    return len(cs) >= 4 and cs in cb
+
+
+def group_similar(cands):
+    """Fold names that are spelling variants of the same brand into one entry with the rest as its other names.
+    'Hero Xpulse 200' + 'Xpulse 200' + 'X-Pulse 200' + 'Hero XPulse' -> one brand.
+    A short name that fits inside two different brands ('Royal Enfield' inside Himalayan 450 and Classic 350)
+    stays on its own: guessing would merge brands that are really different."""
+    rank = {"high": 0, "medium": 1, "low": 2}
+    order = sorted(cands, key=lambda d: (-len(_tokens(d["name"])), rank[d["confidence"]], -d["mentions"]))
+    root_of, groups = {}, {}
+    for d in order:
+        key = d["name"].lower()
+        parents = {root_of[p["name"].lower()] for p in order
+                   if p["name"].lower() in root_of and p["name"].lower() != key
+                   and len(_tokens(p["name"])) >= len(_tokens(d["name"])) and _fits_inside(d["name"], p["name"])}
+        if len(parents) == 1:
+            root = parents.pop()
+            root_of[key] = root
+            groups[root]["members"].append(d)
+        else:
+            root_of[key] = key
+            groups[key] = {"root": d, "members": []}
+    out = []
+    for g in groups.values():
+        root, members = g["root"], g["members"]
+        best = min([root] + members, key=lambda d: rank[d["confidence"]])
+        evidence = root["evidence"] + (f" (+{len(members)} similar name{'s' if len(members) > 1 else ''})" if members else "")
+        out.append({"name": root["name"], "mentions": root["mentions"], "evidence": evidence,
+                    "confidence": best["confidence"], "aliases": [m["name"] for m in members]})
+    return sorted(out, key=lambda d: (rank[d["confidence"]], -d["mentions"]))
 
 
 def ai_suggest_brands(industry: str, texts, api_key=None, model="gemini-3.1-flash-lite", sample=150):
@@ -271,7 +329,7 @@ def make_setup_document(industry, detected):
         "industry": industry or "",
         "own_brand": None,
         "brands": [
-            {"name": d["name"], "aliases": [], "mentions": d["mentions"], "found_in": d["evidence"],
+            {"name": d["name"], "aliases": d.get("aliases", []), "mentions": d["mentions"], "found_in": d["evidence"],
              "confidence": d["confidence"], "include": d["confidence"] == "high"}
             for d in detected
         ],
@@ -333,3 +391,61 @@ def load_brand_definitions(sb, tenant_id: str):
     for a in aliases:
         by_brand.setdefault(a["brand_id"], []).append(a["alias"])
     return [{"name": r["brand_name"], "aliases": by_brand.get(r["id"], [])} for r in rows]
+
+
+# ---------------------------------------------------------------- tidy up: merge or remove brands
+def _brand_row(sb, tenant_id, name):
+    rows = sb.table("brands").select("id, brand_name, is_own_brand").eq("tenant_id", tenant_id).execute().data or []
+    return next((r for r in rows if r["brand_name"].lower() == name.lower()), None)
+
+
+def merge_brands(sb, tenant_id: str, source_name: str, target_name: str):
+    """Fold `source` into `target`: its conversations, files, names and own-brand choices move across and the
+    source brand is removed. Returns (ok, message). Needs a service-role client."""
+    src, dst = _brand_row(sb, tenant_id, source_name), _brand_row(sb, tenant_id, target_name)
+    if not src or not dst or src["id"] == dst["id"]:
+        return False, "Choose two different saved brands."
+    notes = []
+    for table, column in (("conversations", "brand_id"), ("data_sources", "brand_id"), ("user_preferences", "own_brand_id")):
+        try:
+            q = sb.table(table).update({column: dst["id"]}).eq(column, src["id"])
+            q.eq("tenant_id", tenant_id).execute()
+        except Exception as e:
+            notes.append(f"{table}: {e}")
+    try:   # other per-brand tables, if present in this database
+        sb.table("conversation_brands").update({"brand_id": dst["id"]}).eq("brand_id", src["id"]).execute()
+    except Exception:
+        pass
+    have = {a["alias"].lower() for a in (sb.table("brand_aliases").select("alias").eq("brand_id", dst["id"]).execute().data or [])}
+    moving = [a["alias"] for a in (sb.table("brand_aliases").select("alias").eq("brand_id", src["id"]).execute().data or [])]
+    fresh = [a for a in dict.fromkeys(moving + [src["brand_name"]]) if a.lower() not in have]
+    if fresh:
+        sb.table("brand_aliases").insert([{"tenant_id": tenant_id, "brand_id": dst["id"], "alias": a} for a in fresh]).execute()
+    try:
+        sb.table("brand_aliases").delete().eq("brand_id", src["id"]).execute()
+    except Exception as e:
+        notes.append(f"aliases: {e}")
+    if src.get("is_own_brand"):
+        sb.table("brands").update({"is_own_brand": True}).eq("id", dst["id"]).execute()
+    try:
+        sb.table("brands").delete().eq("id", src["id"]).execute()
+    except Exception as e:
+        return False, f"Rows were moved to {dst['brand_name']}, but {src['brand_name']} could not be deleted ({e})."
+    return (not notes), (f"Merged {src['brand_name']} into {dst['brand_name']}." if not notes
+                         else f"Merged with warnings: {'; '.join(notes)}")
+
+
+def remove_brand(sb, tenant_id: str, name: str):
+    """Delete a brand that nothing uses. Returns (ok, message)."""
+    row = _brand_row(sb, tenant_id, name)
+    if not row:
+        return False, "That brand was not found."
+    used = sb.table("conversations").select("id", count="exact").eq("brand_id", row["id"]).limit(1).execute()
+    if (used.count or 0) > 0:
+        return False, f"{row['brand_name']} has {used.count:,} conversations. Merge it into another brand instead."
+    try:
+        sb.table("brand_aliases").delete().eq("brand_id", row["id"]).execute()
+        sb.table("brands").delete().eq("id", row["id"]).execute()
+    except Exception as e:
+        return False, f"Could not remove {row['brand_name']} ({e})."
+    return True, f"Removed {row['brand_name']}."

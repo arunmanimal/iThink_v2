@@ -1187,32 +1187,29 @@ def page_benchmarking():
     for n, (field, data) in enumerate(results):
         matrix = (data or {}).get("matrix") or []
         theme.section_label(f"Head to head: {field}" if multi else "Head to head")
-        left, right = st.columns(2, gap="medium")
-        with left:
-            with st.container(border=True):
-                with guarded("Radar"):
-                    theme.chart_title("Radar", f"Net sentiment on the most-discussed '{field}' values")
-                    fig, count = charts.radar_chart(matrix, brands, colours)
-                    if count >= 3:
-                        ai_ui.chart(fig, config=cfg, key=f"bm_radar_{n}")
-                    else:
-                        st.info("Fewer than 3 attributes have enough opinionated mentions (10+) for your brand and a competitor.")
-        with right:
-            with st.container(border=True):
-                with guarded("Scorecard"):
-                    theme.chart_title("Scorecard", "Net sentiment score, -10 to +10")
-                    rows = charts.scorecard_rows(matrix, brands)
-                    if rows:
-                        theme.scorecard_table(rows, brands, own)
-                        theme.note("Gap = your score minus the average of the competitors shown. "
-                                   "Trend compares your second half of the period with the first.")
-                        series = [{"name": f"{b} score", "points": [[r.get("attribute"), r["scores"].get(b)] for r in rows]}
-                                  for b in brands]
-                        series.append({"name": "Gap (own minus competitor average)",
-                                       "points": [[r.get("attribute"), r.get("gap")] for r in rows]})
-                        ai_ui.data_insights(f"bm_scorecard_{n}", series)
-                    else:
-                        st.info("No attributes with enough opinionated mentions for your brand and a competitor.")
+        with st.container(border=True):
+            with guarded("Radar"):
+                theme.chart_title("Radar", f"Net sentiment on the most-discussed '{field}' values")
+                fig, count = charts.radar_chart(matrix, brands, colours)
+                if count >= 3:
+                    ai_ui.chart_side(fig, key=f"bm_radar_{n}", config=cfg)
+                else:
+                    st.info("Fewer than 3 attributes have enough opinionated mentions (10+) for your brand and a competitor.")
+        with st.container(border=True):
+            with guarded("Scorecard"):
+                theme.chart_title("Scorecard", "Net sentiment score, -10 to +10")
+                rows = charts.scorecard_rows(matrix, brands)
+                if rows:
+                    theme.scorecard_table(rows, brands, own)
+                    theme.note("Gap = your score minus the average of the competitors shown. "
+                               "Trend compares your second half of the period with the first.")
+                    series = [{"name": f"{b} score", "points": [[r.get("attribute"), r["scores"].get(b)] for r in rows]}
+                              for b in brands]
+                    series.append({"name": "Gap (own minus competitor average)",
+                                   "points": [[r.get("attribute"), r.get("gap")] for r in rows]})
+                    ai_ui.data_insights(f"bm_scorecard_{n}", series)
+                else:
+                    st.info("No attributes with enough opinionated mentions for your brand and a competitor.")
 
     theme.section_label("Switching risk")
     rival = chosen[0]

@@ -217,6 +217,16 @@ def data_insights(key: str, series: list, card: dict = None):
     insights_for(None, key, card, payload)
 
 
+def chart_side(fig, key: str, config: dict = None, ratio=(3, 2)):
+    """Chart on the left, its Insights button and insights on the right (for wide cards)."""
+    left, right = st.columns(list(ratio), gap="medium")
+    with left:
+        st.plotly_chart(fig, config=config, key=key)
+        _register(fig)
+    with right:
+        insights_for(fig, key)
+
+
 def chart(fig, *args, **kwargs):
     """Drop-in for st.plotly_chart that adds the Insights button below the chart."""
     st.plotly_chart(fig, *args, **kwargs)
